@@ -289,19 +289,7 @@ input,textarea,select,[contenteditable="true"]{-webkit-user-select:text;user-sel
   <button class="btn" id="admin-gate-button" type="button">Continuer</button>
   <p id="admin-gate-status" class="admin-status" role="status"></p>
  </div>
- <div id="admin-auth" hidden>
-  <div class="admin-box">
-   <h3>Confirmation administrateur</h3>
-   <p class="mut">Un code temporaire sera envoyé à l’adresse officielle du CCCE. Après vérification, votre session restera active jusqu’à votre déconnexion.</p>
-   <p><strong>Adresse de confirmation : cccerdc@gmail.com</strong></p>
-   <button class="btn" id="admin-send-code" type="button">Envoyer le code de confirmation</button>
-   <div id="admin-otp-box" hidden>
-    <label>Code reçu par e-mail<input id="admin-otp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></label>
-    <button class="btn" id="admin-verify-code" type="button">Confirmer et accéder à l’espace administrateur</button>
-   </div>
-   <p id="admin-auth-status" class="admin-status" role="status"></p>
-  </div>
- </div>
+ <div id="admin-auth" hidden></div>
  <div id="admin-dashboard" hidden>
   <div class="admin-box">
    <h3>Tableau de bord</h3>
@@ -549,72 +537,27 @@ go();
 
   byId('admin-gate-button')?.addEventListener('click', async () => {
     const status = byId('admin-gate-status');
-    if (byId('admin-access-code').value !== ACCESS_CODE) { status.textContent = 'Code incorrect.'; return; }
-    byId('admin-auth').hidden = false;
-    byId('admin-otp-box').hidden = true;
-    byId('admin-otp').value = '';
-    byId('admin-auth-status').textContent = '';
-    status.textContent = 'Code accepté. Demandez votre code de confirmation par e-mail.';
-    // Une session déjà authentifiée reste active : pas de nouvel e-mail nécessaire.
-    const {data:{session}} = await sb.auth.getSession();
-    if (session) {
-      try { await verifyAdmin(); }
-      catch (e) { byId('admin-auth-status').textContent = e.message; }
+    if (byId('admin-access-code').value !== ACCESS_CODE) {
+      status.textContent = 'Code incorrect.';
+      return;
     }
-  });
-
-  async function verifyAdmin() {
-    const {data:{user},error} = await sb.auth.getUser();
-    if (error || !user) throw new Error('La vérification par code e-mail est requise.');
-    if ((user.email || '').toLowerCase() !== ADMIN_EMAIL) {
-      await sb.auth.signOut();
-      throw new Error('Cette adresse n’est pas autorisée comme administrateur principal.');
+    // Accès direct par code, sans confirmation par e-mail.
+    let localAdminId = localStorage.getItem('ccce_admin_local_id');
+    if (!localAdminId) {
+      localAdminId = crypto.randomUUID ? crypto.randomUUID() :
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 3 | 8)).toString(16);
+        });
+      localStorage.setItem('ccce_admin_local_id', localAdminId);
     }
-    const {data:role,error:roleError} = await sb.from('roles')
-      .select('role').eq('user_id',user.id).eq('role','admin').maybeSingle();
-    if (roleError || !role) {
-      await sb.auth.signOut();
-      throw new Error('Le rôle administrateur n’est pas activé pour ce compte.');
-    }
-    currentUser = user;
+    currentUser = {id: localAdminId, email: 'Accès par code'};
+    byId('admin-gate').hidden = true;
     byId('admin-auth').hidden = true;
     byId('admin-dashboard').hidden = false;
-    byId('admin-session-email').textContent = user.email;
+    byId('admin-session-email').textContent = 'Accès par code';
+    status.textContent = '';
     await refreshDashboard();
-  }
-
-  byId('admin-send-code')?.addEventListener('click', async () => {
-    const status = byId('admin-auth-status');
-    status.textContent = 'Envoi du code de confirmation…';
-    const {error} = await sb.auth.signInWithOtp({
-      email: ADMIN_EMAIL,
-      options: {shouldCreateUser: false}
-    });
-    if (error) {
-      status.textContent = error.message.includes('rate limit')
-        ? 'La limite temporaire d’envoi d’e-mails de Supabase est atteinte. Réessayez plus tard.'
-        : 'Impossible d’envoyer le code : ' + error.message;
-      return;
-    }
-    byId('admin-otp-box').hidden = false;
-    status.textContent = 'Code envoyé à ' + ADMIN_EMAIL + '. Vérifiez aussi les courriers indésirables.';
-  });
-
-  byId('admin-verify-code')?.addEventListener('click', async () => {
-    const status = byId('admin-auth-status');
-    const token = byId('admin-otp').value.trim().replace(/\s+/g,'');
-    if (!/^\d{6,8}$/.test(token)) {
-      status.textContent = 'Saisissez le code numérique reçu par e-mail.';
-      return;
-    }
-    status.textContent = 'Vérification du code…';
-    const {error} = await sb.auth.verifyOtp({email:ADMIN_EMAIL,token,type:'email'});
-    if (error) {
-      status.textContent = 'Code invalide ou expiré : ' + error.message;
-      return;
-    }
-    try { await verifyAdmin(); status.textContent = ''; }
-    catch (e) { status.textContent = e.message; }
   });
 
   async function refreshDashboard() {
@@ -914,10 +857,12 @@ go();
   });
 
   byId('admin-refresh')?.addEventListener('click',refreshDashboard);
-  byId('admin-logout')?.addEventListener('click',async()=>{
-    await sb.auth.signOut(); currentUser=null;
-    byId('admin-dashboard').hidden=true; byId('admin-auth').hidden=false;
-    byId('admin-auth-status').textContent='Session fermée.';
+  byId('admin-logout')?.addEventListener('click',()=>{
+    currentUser=null;
+    byId('admin-dashboard').hidden=true;
+    byId('admin-gate').hidden=false;
+    byId('admin-access-code').value='';
+    byId('admin-gate-status').textContent='Session fermée.';
   });
 
   byId('contact-form')?.addEventListener('submit', async e => {
