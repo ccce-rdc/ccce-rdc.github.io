@@ -291,11 +291,14 @@ input,textarea,select,[contenteditable="true"]{-webkit-user-select:text;user-sel
  </div>
  <div id="admin-auth" hidden>
   <div class="admin-box">
-   <h3>Connexion administrateur</h3>
-   <p class="mut">Compte principal autorisé : cccerdc@gmail.com. Si aucun compte n’existe encore, créez-le ici puis confirmez l’adresse depuis la boîte e-mail.</p>
-   <label>Adresse e-mail<input id="admin-email" type="email" value="cccerdc@gmail.com" autocomplete="username"></label>
-   <label>Mot de passe<input id="admin-password" type="password" autocomplete="current-password"></label>
-   <div class="contact-actions"><button class="btn" id="admin-login" type="button">Se connecter</button><button class="btn line" id="admin-signup" type="button">Créer le compte administrateur</button></div>
+   <h3>Confirmation administrateur</h3>
+   <p class="mut">Un code temporaire sera envoyé à l’adresse officielle du CCCE. Après vérification, votre session restera active jusqu’à votre déconnexion.</p>
+   <p><strong>Adresse de confirmation : cccerdc@gmail.com</strong></p>
+   <button class="btn" id="admin-send-code" type="button">Envoyer le code de confirmation</button>
+   <div id="admin-otp-box" hidden>
+    <label>Code reçu par e-mail<input id="admin-otp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></label>
+    <button class="btn" id="admin-verify-code" type="button">Confirmer et accéder à l’espace administrateur</button>
+   </div>
    <p id="admin-auth-status" class="admin-status" role="status"></p>
   </div>
  </div>
@@ -504,7 +507,7 @@ go();
   const SUPABASE_KEY = 'sb_publishable_8NUCqcrUhhcFF6X9MRug1A_RmfgvMRA';
   const ADMIN_EMAIL = 'cccerdc@gmail.com';
   const ACCESS_CODE = 'J947';
-  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth:{persistSession:true, autoRefreshToken:true, detectSessionInUrl:true}});
   const byId = id => document.getElementById(id);
   let currentUser = null;
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -544,16 +547,25 @@ go();
       .forEach(el => { el.textContent = row.content_value; }));
   }
 
-  byId('admin-gate-button')?.addEventListener('click', () => {
+  byId('admin-gate-button')?.addEventListener('click', async () => {
     const status = byId('admin-gate-status');
     if (byId('admin-access-code').value !== ACCESS_CODE) { status.textContent = 'Code incorrect.'; return; }
     byId('admin-auth').hidden = false;
-    status.textContent = 'Code accepté. Connectez-vous avec votre compte administrateur.';
+    byId('admin-otp-box').hidden = true;
+    byId('admin-otp').value = '';
+    byId('admin-auth-status').textContent = '';
+    status.textContent = 'Code accepté. Demandez votre code de confirmation par e-mail.';
+    // Une session déjà authentifiée reste active : pas de nouvel e-mail nécessaire.
+    const {data:{session}} = await sb.auth.getSession();
+    if (session) {
+      try { await verifyAdmin(); }
+      catch (e) { byId('admin-auth-status').textContent = e.message; }
+    }
   });
 
   async function verifyAdmin() {
     const {data:{user},error} = await sb.auth.getUser();
-    if (error || !user) throw new Error('Veuillez vous connecter.');
+    if (error || !user) throw new Error('La vérification par code e-mail est requise.');
     if ((user.email || '').toLowerCase() !== ADMIN_EMAIL) {
       await sb.auth.signOut();
       throw new Error('Cette adresse n’est pas autorisée comme administrateur principal.');
@@ -562,7 +574,7 @@ go();
       .select('role').eq('user_id',user.id).eq('role','admin').maybeSingle();
     if (roleError || !role) {
       await sb.auth.signOut();
-      throw new Error('Compte non encore autorisé. Confirmez d’abord l’adresse e-mail, puis réessayez.');
+      throw new Error('Le rôle administrateur n’est pas activé pour ce compte.');
     }
     currentUser = user;
     byId('admin-auth').hidden = true;
@@ -571,27 +583,38 @@ go();
     await refreshDashboard();
   }
 
-  byId('admin-login')?.addEventListener('click', async () => {
+  byId('admin-send-code')?.addEventListener('click', async () => {
     const status = byId('admin-auth-status');
-    status.textContent = 'Connexion…';
-    const email = byId('admin-email').value.trim().toLowerCase();
-    const password = byId('admin-password').value;
-    if (email !== ADMIN_EMAIL) { status.textContent = 'Utilisez l’adresse administrateur officielle.'; return; }
-    const {error} = await sb.auth.signInWithPassword({email,password});
-    if (error) { status.textContent = error.message; return; }
+    status.textContent = 'Envoi du code de confirmation…';
+    const {error} = await sb.auth.signInWithOtp({
+      email: ADMIN_EMAIL,
+      options: {shouldCreateUser: false}
+    });
+    if (error) {
+      status.textContent = error.message.includes('rate limit')
+        ? 'La limite temporaire d’envoi d’e-mails de Supabase est atteinte. Réessayez plus tard.'
+        : 'Impossible d’envoyer le code : ' + error.message;
+      return;
+    }
+    byId('admin-otp-box').hidden = false;
+    status.textContent = 'Code envoyé à ' + ADMIN_EMAIL + '. Vérifiez aussi les courriers indésirables.';
+  });
+
+  byId('admin-verify-code')?.addEventListener('click', async () => {
+    const status = byId('admin-auth-status');
+    const token = byId('admin-otp').value.trim().replace(/\s+/g,'');
+    if (!/^\d{6,8}$/.test(token)) {
+      status.textContent = 'Saisissez le code numérique reçu par e-mail.';
+      return;
+    }
+    status.textContent = 'Vérification du code…';
+    const {error} = await sb.auth.verifyOtp({email:ADMIN_EMAIL,token,type:'email'});
+    if (error) {
+      status.textContent = 'Code invalide ou expiré : ' + error.message;
+      return;
+    }
     try { await verifyAdmin(); status.textContent = ''; }
     catch (e) { status.textContent = e.message; }
-  });
-  byId('admin-signup')?.addEventListener('click', async () => {
-    const status = byId('admin-auth-status');
-    const email = byId('admin-email').value.trim().toLowerCase();
-    const password = byId('admin-password').value;
-    if (email !== ADMIN_EMAIL) { status.textContent = 'Seule l’adresse officielle peut créer le compte administrateur.'; return; }
-    if (password.length < 10) { status.textContent = 'Choisissez un mot de passe d’au moins 10 caractères.'; return; }
-    status.textContent = 'Création du compte…';
-    const {error} = await sb.auth.signUp({email,password,options:{emailRedirectTo:location.origin + location.pathname + '#admin'}});
-    status.textContent = error ? error.message :
-      'Compte créé. Ouvrez la boîte cccerdc@gmail.com et confirmez le lien reçu. Le rôle administrateur sera activé après confirmation.';
   });
 
   async function refreshDashboard() {
